@@ -61,4 +61,5 @@ replicate_data = PostgresToRedshiftOperator(
     },
     truncate=True,
     dag=dag
+)
 ```
