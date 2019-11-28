@@ -20,6 +20,7 @@ import boto3
 import psycopg2
 from jinja2 import Template
 from sqlalchemy.engine.url import make_url
+
 from airflow.hooks.postgres_hook import PostgresHook
 from airflow.plugins_manager import AirflowPlugin
 from airflow.models import BaseOperator
