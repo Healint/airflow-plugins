@@ -1,4 +1,4 @@
-# postgres_to_redshift_operator
+# healthcheck_operator
 
 This operator handles the healthcheck of tables in data warehouse.
 
