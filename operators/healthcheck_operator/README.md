@@ -43,6 +43,7 @@ We only list down additional Task Instance arguments here.
 | test_reference | dict | specify test name, type and expected value to check against |
 | verbose | boolean | sent more verbose message to slack |
 | block_on_failure | boolean | whether failing the transformation task would block the subsequent tasks |
+| users_to_alert | tuple | slack users to include when healthcheck fails|
 
 # Example
 

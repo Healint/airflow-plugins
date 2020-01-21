@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Tuple
+from typing import Tuple, Dict, List
 
 from jinja2 import Template
 from slackclient import SlackClient
@@ -25,6 +25,7 @@ HEALTHCHECKS_PATH = os.path.join(
 
 # database hook used for Healthcheck, data warehouse specific
 DW_HOOK = PostgresHook
+PRIMARY_SLACK_NOTIFIER = ["user"]
 
 # Healthcheck reporting slack channel
 slack_token = Variable.get("slack_token")
@@ -108,6 +109,7 @@ class BaseHealthCheckOperator(BaseOperator):
         test_reference: dict = None,
         block_on_failure: bool = False,
         verbose: bool = False,
+        users_to_alert: Tuple = (),
         *args,
         **kwargs,
     ):
@@ -117,6 +119,9 @@ class BaseHealthCheckOperator(BaseOperator):
         self.test_reference = test_reference
         self.block_on_failure = block_on_failure
         self.verbose = verbose
+        self.users_to_alert = list(users_to_alert)
+
+        self.users_to_alert.extend(PRIMARY_SLACK_NOTIFIER)
 
         # initialise
         self._test_queries = {}
@@ -186,16 +191,61 @@ class BaseHealthCheckOperator(BaseOperator):
             else:
                 raise AirflowException("Unknown comparison sign. ")
         else:
-            raise AirflowException("Unknown Healthcheck type.")
+            raise AirflowException("Unknown Healthcheck type. ")
 
         return assertion, {"reference": reference, "actual": resp}
 
-    def _report_assertions(self, context):
-        # status color
+    def _report_assertions(
+        self,
+        attachments: List[Dict[str, str]],
+        successful_test_count: int,
+        total_tests_count: int,
+        context: dict,
+    ):
+        """
+        construct post message and report to slack
+        :param attachments:
+        :param successful_test_count:
+        :param total_tests_count:
+        :param context:
+        :return:
+        """
+        if successful_test_count != total_tests_count:
+            status_color = ":x:"
+            notification_list = ", ".join(
+                [f"<@{user}>" for user in self.users_to_alert]
+            )
+            alerting_text = f"Alerting: {notification_list}"
+        else:
+            status_color = ":white_check_mark:"
+            alerting_text = ""
+
+        main_text = (
+            f'Task health: {status_color}  - {context.get("task_instance").task_id}:'
+            f" {successful_test_count} / {total_tests_count} \n {alerting_text}"
+        )
+
+        api_params = {
+            "channel": slack_channel,
+            "username": "DW Healthchecker",
+            "text": main_text,
+            "icon_url": "https://raw.githubusercontent.com/airbnb/airflow/master/airflow/www/static/pin_100.png",
+            "attachments": json.dumps(attachments),
+        }
+
+        sc = SlackClient(slack_token)
+        rc = sc.api_call(method="chat.postMessage", **api_params)
+
+        self.log.warning(rc)
+
+    def _aggregate_test_results(self):
+        """
+        aggregate test cases result and construct
+        messages
+        :return:
+        """
         status_color = {True: "#2eb886", False: "#d61922"}
-
         attachments = []
-
         total_tests = len(self._assertions)
         successful_tests = 0
         for assertion in self._assertions:
@@ -220,25 +270,7 @@ class BaseHealthCheckOperator(BaseOperator):
             if test_status:
                 successful_tests += 1
 
-        if successful_tests != total_tests:
-            status_color = ":x:"
-        else:
-            status_color = ":white_check_mark:"
-
-        api_params = {
-            "channel": slack_channel,
-            "username": "DW Healthchecker",
-            "text": f'Task health: {status_color}  - {context.get("task_instance").task_id}: {successful_tests} / {total_tests}',
-            "icon_url": "https://raw.githubusercontent.com/airbnb/airflow/master/airflow/www/static/pin_100.png",
-            "attachments": json.dumps(attachments),
-        }
-
-        sc = SlackClient(slack_token)
-        rc = sc.api_call(method="chat.postMessage", **api_params)
-
-        self.log.warning(rc)
-
-        return successful_tests == total_tests
+        return attachments, successful_tests, total_tests
 
     def execute(self, context):
         self._test_queries = self._load_test_queries(context)
@@ -252,9 +284,28 @@ class BaseHealthCheckOperator(BaseOperator):
             assertion = self._assert_resp(test_name, resp)
             self._format_assertion(assertion, test_name)
 
-        suite_success = self._report_assertions(context)
+        slack_result_attachments, successful_tests_count, total_tests_count = (
+            self._aggregate_test_results()
+        )
+        suite_status = successful_tests_count == total_tests_count
 
-        if self.block_on_failure and not suite_success:
+        if not context["test_mode"]:
+            # not in test mode, report
+            self._report_assertions(
+                attachments=slack_result_attachments,
+                successful_test_count=successful_tests_count,
+                total_tests_count=total_tests_count,
+                context=context,
+            )
+        else:
+            self.log.warning(
+                f"Reporting to Slack is disabled during test / backfill mode. "
+                f"Showing failure result attachments below: "
+            )
+
+            self.log.warning(slack_result_attachments)
+
+        if self.block_on_failure and not suite_status:
             raise AirflowException("Blocking this task due to healthcheck failure. ")
 
         self.log.warning("Task completed.")
